@@ -1,5 +1,7 @@
 import { User } from "../models/user.models.js";
+import { generateTokenAndSetCookie } from "../utils/generateTokenAndSetCookie.js";
 import { generateVerificationCode } from "../utils/generateVerificationCode.js";
+import bcryptjs from "bcryptjs";
 
 export const signUp = async (req, res) => {
     const {email, password,name } = req.body;
@@ -9,12 +11,14 @@ export const signUp = async (req, res) => {
             throw new Error('All fields are required');
         }
         const userAlreadyExists = await User.findOne({email});
+        console.log("userAlreadyExists", userAlreadyExists)
+
         if(userAlreadyExists){
             return res.status(400).json({success:false, message: 'User already exists'})
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const verificationCode = generateVerificationCode();
+        const hashedPassword = await bcryptjs.hash(password, 10);
+        const verificationToken = generateVerificationCode();
 
         const user = new User({
           email,
@@ -28,16 +32,53 @@ export const signUp = async (req, res) => {
 
         //jwt
         generateTokenAndSetCookie(res, user._id);
+        sendVerificationEmail(user.email, verificationToken);
 
+        res.status(201).json({
+          success: true,
+          message: "User created successfully",
+          user: {
+            ...user._doc,
+            password:undefined
+          }
+        })
     }catch(error){
         res.status(400).json({success: false, message: error.message})
     }
 };
 
-export const logIn = (req, res) => {
-  res.send("login Route");
+export const logIn = async (req, res) => {
+  const {email, password} = req.body;
+  try{
+    const user = await User.findOne({email});
+
+    if(!user){
+      return res.status(400).json({success: false, message: "Invalid credentials"});
+    }
+    const isPasswordValid = await bcryptjs.compare(password, user.password);
+    if(!isPasswordValid){
+      return res.status(400).json({success: false, message: "Invalid credentials"});
+    }
+
+    generateTokenAndSetCookie(res, user._id);
+
+    user.lastLogin = new Date();
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Logged in successfully",
+      user: {
+        ...user._doc,
+        password: undefined,
+      },
+    });
+  }catch(error){
+
+  }
 };
 
 export const logOut = (req, res) => {
-  res.send("logout Route");
+  res.clearCookie("token");
+  res.status(200).json({success: true, message: "Logged out successfully"});
 };
