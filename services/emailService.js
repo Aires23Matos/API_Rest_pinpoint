@@ -5,7 +5,7 @@ const MAILTRAP_API_BASE = process.env.MAILTRAP_API_URL || 'http://localhost:3000
 class EmailService {
     constructor() {
         this.apiBase = MAILTRAP_API_BASE;
-        this.timeout = 5000; // 5 segundos de timeout
+        this.timeout = 10000; // 5 segundos de timeout
     }
 
     async makeRequest(endpoint, data) {
