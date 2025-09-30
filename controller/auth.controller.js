@@ -12,7 +12,7 @@ export const signUp = async (req, res) => {
         if (!email || !password || !name) {
             throw new Error('All fields are required');
         }
-        
+
         const userAlreadyExists = await User.findOne({ email });
         console.log("userAlreadyExists", userAlreadyExists);
 
@@ -28,31 +28,38 @@ export const signUp = async (req, res) => {
             password: hashedPassword,
             name,
             verificationToken,
-            verificationTokenExpireAt: Date.now() + 24 * 60 * 60 * 1000
+            verificationTokenExpireAt: Date.now() + 24 * 60 * 60 * 1000 // 24 horas
         });
 
         await user.save();
 
         // JWT
         generateTokenAndSetCookie(res, user._id);
-        
-        // USANDO A API MAILTRAP
-        await emailService.sendVerificationEmail(user.email, verificationToken);
+
+        // TENTA enviar o e-mail, mas NÃO BLOQUEIA se falhar
+        try {
+            await emailService.sendVerificationEmail(user.email, verificationToken);
+            console.log("E-mail de verificação enviado com sucesso");
+        } catch (emailError) {
+            console.warn("AVISO: E-mail de verificação não pôde ser enviado, mas o usuário foi criado:", emailError.message);
+            // Não lança erro - o usuário ainda pode verificar manualmente com o código
+        }
 
         res.status(201).json({
             success: true,
-            message: "Usuário criado com sucesso",
+            message: "Usuário criado com sucesso. Verifique seu e-mail para o código de verificação.",
             user: {
                 ...user._doc,
                 password: undefined
-            }
+            },
+            // EM DESENVOLVIMENTO: Mostrar o código diretamente para testes
+            verificationToken: process.env.NODE_ENV === 'development' ? verificationToken : undefined
         });
     } catch (error) {
         console.error("Erro no signUp:", error);
         res.status(400).json({ success: false, message: error.message });
     }
 };
-
 
 export const verifyEmail = async (req, res) => {
     const { code } = req.body;
@@ -75,8 +82,13 @@ export const verifyEmail = async (req, res) => {
         user.verificationTokenExpireAt = undefined;
         await user.save();
 
-        // USANDO A API MAILTRAP
-        await emailService.sendWelcomeEmail(user.email, user.name);
+        // TENTA enviar e-mail de boas-vindas, mas não bloqueia se falhar
+        try {
+            await emailService.sendWelcomeEmail(user.email, user.name);
+            console.log("E-mail de boas-vindas enviado com sucesso");
+        } catch (emailError) {
+            console.warn("AVISO: E-mail de boas-vindas não pôde ser enviado:", emailError.message);
+        }
 
         res.status(200).json({
             success: true,
@@ -95,6 +107,63 @@ export const verifyEmail = async (req, res) => {
     }
 };
 
+export const resendVerificationCode = async (req, res) => {
+    const { email } = req.body;
+
+    try {
+        if (!email) {
+            return res.status(400).json({
+                success: false,
+                message: "Email é obrigatório"
+            });
+        }
+
+        const user = await User.findOne({ email });
+
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: "Usuário não encontrado"
+            });
+        }
+
+        if (user.isVerified) {
+            return res.status(400).json({
+                success: false,
+                message: "Usuário já verificado"
+            });
+        }
+
+        // Gera novo código
+        const newVerificationToken = generateVerificationCode();
+
+        user.verificationToken = newVerificationToken;
+        user.verificationTokenExpireAt = Date.now() + 24 * 60 * 60 * 1000; // 24 horas
+        await user.save();
+
+        // Tenta enviar o novo código por e-mail
+        try {
+            await emailService.sendVerificationEmail(user.email, newVerificationToken);
+            console.log("Novo código de verificação enviado com sucesso");
+        } catch (emailError) {
+            console.warn("AVISO: Não foi possível enviar o novo código por e-mail:", emailError.message);
+        }
+
+        res.status(200).json({
+            success: true,
+            message: "Novo código de verificação gerado",
+            // EM DESENVOLVIMENTO: Mostrar o código diretamente
+            verificationToken: process.env.NODE_ENV === 'development' ? newVerificationToken : undefined
+        });
+
+    } catch (error) {
+        console.error("Erro no resendVerificationCode:", error);
+        res.status(500).json({
+            success: false,
+            message: "Erro ao reenviar código de verificação"
+        });
+    }
+};
 
 export const logIn = async (req, res) => {
   const { email, password } = req.body;
@@ -197,26 +266,19 @@ export const forgotPassword = async (req, res) => {
 
         try {
             const resetUrl = `${process.env.APP_ORIGIN}/reset-password/${resetToken}`;
-            
-            // USANDO A API MAILTRAP
             await emailService.sendPasswordResetEmail(user.email, resetUrl);
-
-            return res.status(200).json({
-                success: true,
-                message: "Se o email estiver cadastrado, você receberá um link de redefinição"
-            });
         } catch (emailError) {
-            console.error("Erro ao enviar email:", emailError);
-
-            user.resetPasswordToken = undefined;
-            user.resetPasswordExpiresAt = undefined;
-            await user.save();
-
-            return res.status(500).json({
-                success: false,
-                message: "Erro ao enviar email de redefinição. Por favor, tente novamente mais tarde."
-            });
+            console.warn("AVISO: E-mail de reset não pôde ser enviado:", emailError.message);
+            // Não reverte o token - o usuário ainda pode usar o link manualmente
         }
+
+        return res.status(200).json({
+            success: true,
+            message: "Se o email estiver cadastrado, você receberá um link de redefinição",
+            // EM DESENVOLVIMENTO: Mostrar o token diretamente
+            resetToken: process.env.NODE_ENV === 'development' ? resetToken : undefined
+        });
+
     } catch (error) {
         console.error("Erro em forgotPassword:", error);
         return res.status(500).json({
@@ -237,9 +299,9 @@ export const resetPassword = async (req, res) => {
         });
 
         if (!user) {
-            return res.status(400).json({ 
-                success: false, 
-                message: "Token de redefinição inválido ou expirado" 
+            return res.status(400).json({
+                success: false,
+                message: "Token de redefinição inválido ou expirado"
             });
         }
 
@@ -250,18 +312,22 @@ export const resetPassword = async (req, res) => {
         user.resetPasswordExpiresAt = undefined;
         await user.save();
 
-        // USANDO A API MAILTRAP
-        await emailService.sendResetSuccessEmail(user.email);
+        // Tenta enviar e-mail de sucesso, mas não bloqueia
+        try {
+            await emailService.sendResetSuccessEmail(user.email);
+        } catch (emailError) {
+            console.warn("AVISO: E-mail de sucesso não pôde ser enviado:", emailError.message);
+        }
 
-        res.status(200).json({ 
-            success: true, 
-            message: "Redefinição de senha bem-sucedida" 
+        res.status(200).json({
+            success: true,
+            message: "Redefinição de senha bem-sucedida"
         });
     } catch (error) {
         console.log("Erro em resetPassword ", error);
-        res.status(400).json({ 
-            success: false, 
-            message: error.message 
+        res.status(400).json({
+            success: false,
+            message: error.message
         });
     }
 };
