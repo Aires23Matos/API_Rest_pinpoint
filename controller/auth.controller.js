@@ -1,4 +1,4 @@
-import { emailService } from "../services/emailService.js";
+import { sendPasswordResetEmail, sendResetSuccessEmail, sendVerificationEmail, sendWelcomeEmail } from "../mailtrap/email.js";
 import { User } from "../models/user.models.js";
 import { generateTokenAndSetCookie } from "../utils/generateTokenAndSetCookie.js";
 import { generateVerificationCode } from "../utils/generateVerificationCode.js";
@@ -6,163 +6,86 @@ import bcryptjs from "bcryptjs";
 import crypto from "crypto";
 
 export const signUp = async (req, res) => {
-    const { email, password, name } = req.body;
+    const {email, password,name } = req.body;
 
-    try {
-        if (!email || !password || !name) {
+    try{
+        if(!email || !password || !name){
             throw new Error('All fields are required');
         }
+        const userAlreadyExists = await User.findOne({email});
+        console.log("userAlreadyExists", userAlreadyExists)
 
-        const userAlreadyExists = await User.findOne({ email });
-        console.log("userAlreadyExists", userAlreadyExists);
-
-        if (userAlreadyExists) {
-            return res.status(400).json({ success: false, message: 'O usuário já existe' });
+        if(userAlreadyExists){
+            return res.status(400).json({success:false, message: 'O usuário já existe'})
         }
 
         const hashedPassword = await bcryptjs.hash(password, 10);
         const verificationToken = generateVerificationCode();
 
         const user = new User({
-            email,
-            password: hashedPassword,
-            name,
-            verificationToken,
-            verificationTokenExpireAt: Date.now() + 24 * 60 * 60 * 1000 // 24 horas
+          email,
+          password: hashedPassword,
+          name,
+          verificationToken,
+          verificationTokenExpireAt: Date.now() + 24 * 60 *60 *1000
         });
 
         await user.save();
 
-        // JWT
+        //jwt
         generateTokenAndSetCookie(res, user._id);
-
-        // TENTA enviar o e-mail, mas NÃO BLOQUEIA se falhar
-        try {
-            await emailService.sendVerificationEmail(user.email, verificationToken);
-            console.log("E-mail de verificação enviado com sucesso");
-        } catch (emailError) {
-            console.warn("AVISO: E-mail de verificação não pôde ser enviado, mas o usuário foi criado:", emailError.message);
-            // Não lança erro - o usuário ainda pode verificar manualmente com o código
-        }
+        sendVerificationEmail(user.email, verificationToken);
 
         res.status(201).json({
-            success: true,
-            message: "Usuário criado com sucesso. Verifique seu e-mail para o código de verificação.",
-            user: {
-                ...user._doc,
-                password: undefined
-            },
-            // EM DESENVOLVIMENTO: Mostrar o código diretamente para testes
-            verificationToken: process.env.NODE_ENV === 'development' ? verificationToken : undefined
-        });
-    } catch (error) {
-        console.error("Erro no signUp:", error);
-        res.status(400).json({ success: false, message: error.message });
+          success: true,
+          message: "Usuário criado com sucesso",
+          user: {
+            ...user._doc,
+            password:undefined
+          }
+        })
+    }catch(error){
+        res.status(400).json({success: false, message: error.message})
     }
 };
 
 export const verifyEmail = async (req, res) => {
-    const { code } = req.body;
+  const { code } = req.body;
 
-    try {
-        const user = await User.findOne({
-            verificationToken: code,
-            verificationTokenExpireAt: { $gt: Date.now() },
-        });
+  try {
+    const user = await User.findOne({
+      verificationToken: code,
+      verificationTokenExpireAt: { $gt: Date.now() },
+    });
 
-        if (!user) {
-            return res.status(400).json({
-                success: false,
-                message: "Código de verificação inválido ou expirado",
-            });
-        }
-
-        user.isVerified = true;
-        user.verificationToken = undefined;
-        user.verificationTokenExpireAt = undefined;
-        await user.save();
-
-        // TENTA enviar e-mail de boas-vindas, mas não bloqueia se falhar
-        try {
-            await emailService.sendWelcomeEmail(user.email, user.name);
-            console.log("E-mail de boas-vindas enviado com sucesso");
-        } catch (emailError) {
-            console.warn("AVISO: E-mail de boas-vindas não pôde ser enviado:", emailError.message);
-        }
-
-        res.status(200).json({
-            success: true,
-            message: "E-mail verificado com sucesso",
-            user: {
-                ...user._doc,
-                password: undefined,
-            },
-        });
-    } catch (error) {
-        console.error("Erro no verifyEmail:", error);
-        res.status(500).json({
-            success: false,
-            message: error.message || "Erro do servidor durante a verificação",
-        });
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Código de verificação inválido ou expirado",
+      });
     }
-};
 
-export const resendVerificationCode = async (req, res) => {
-    const { email } = req.body;
+    user.isVerified = true;
+    user.verificationToken = undefined;
+    user.verificationTokenExpireAt = undefined;
+    await user.save();
 
-    try {
-        if (!email) {
-            return res.status(400).json({
-                success: false,
-                message: "Email é obrigatório"
-            });
-        }
+    await sendWelcomeEmail(user.email, user.name);
 
-        const user = await User.findOne({ email });
-
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: "Usuário não encontrado"
-            });
-        }
-
-        if (user.isVerified) {
-            return res.status(400).json({
-                success: false,
-                message: "Usuário já verificado"
-            });
-        }
-
-        // Gera novo código
-        const newVerificationToken = generateVerificationCode();
-
-        user.verificationToken = newVerificationToken;
-        user.verificationTokenExpireAt = Date.now() + 24 * 60 * 60 * 1000; // 24 horas
-        await user.save();
-
-        // Tenta enviar o novo código por e-mail
-        try {
-            await emailService.sendVerificationEmail(user.email, newVerificationToken);
-            console.log("Novo código de verificação enviado com sucesso");
-        } catch (emailError) {
-            console.warn("AVISO: Não foi possível enviar o novo código por e-mail:", emailError.message);
-        }
-
-        res.status(200).json({
-            success: true,
-            message: "Novo código de verificação gerado",
-            // EM DESENVOLVIMENTO: Mostrar o código diretamente
-            verificationToken: process.env.NODE_ENV === 'development' ? newVerificationToken : undefined
-        });
-
-    } catch (error) {
-        console.error("Erro no resendVerificationCode:", error);
-        res.status(500).json({
-            success: false,
-            message: "Erro ao reenviar código de verificação"
-        });
-    }
+    res.status(200).json({
+      success: true,
+      message: "E-mail verificado com sucesso",
+      user: {
+        ...user._doc,
+        password: undefined,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || "Erro do servidor durante a verificação",
+    });
+  }
 };
 
 export const logIn = async (req, res) => {
@@ -230,106 +153,106 @@ export const logOut = async (req, res) => {
 };
 
 export const forgotPassword = async (req, res) => {
-    const { email } = req.body;
+  const { email } = req.body;
 
-    if (!email) {
-        return res.status(400).json({
-            success: false,
-            message: "O email é obrigatório"
-        });
+  // 1. Validação do input
+  if (!email) {
+    return res.status(400).json({
+      success: false,
+      message: "O email é obrigatório"
+    });
+  }
+
+  // Verificação simples do formato do email
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({
+      success: false,
+      message: "Por favor, forneça um email válido"
+    });
+  }
+
+  try {
+    // 2. Buscar usuário
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      // Não revelar que o email não existe por questões de segurança
+      return res.status(200).json({
+        success: true,
+        message: "Se o email estiver cadastrado, você receberá um link de redefinição"
+      });
     }
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-        return res.status(400).json({
-            success: false,
-            message: "Por favor, forneça um email válido"
-        });
-    }
+    // 3. Gerar token seguro
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetTokenExpiresAt = Date.now() + 3600000; // 1 hora
 
+    // 4. Atualizar usuário
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpiresAt = resetTokenExpiresAt;
+    await user.save();
+
+    // 5. Enviar email
     try {
-        const user = await User.findOne({ email });
+      const resetUrl = `${process.env.APP_ORIGIN}/reset-password/${resetToken}`;
+      await sendPasswordResetEmail(user.email, resetUrl);
 
-        if (!user) {
-            return res.status(200).json({
-                success: true,
-                message: "Se o email estiver cadastrado, você receberá um link de redefinição"
-            });
-        }
+      return res.status(200).json({
+        success: true,
+        message: "Se o email estiver cadastrado, você receberá um link de redefinição"
+      });
+    } catch (emailError) {
+      console.error("Erro ao enviar email:", emailError);
 
-        const resetToken = crypto.randomBytes(32).toString('hex');
-        const resetTokenExpiresAt = Date.now() + 3600000;
+      // Reverter em caso de falha no email
+      user.resetPasswordToken = undefined;
+      user.resetPasswordExpiresAt = undefined;
+      await user.save();
 
-        user.resetPasswordToken = resetToken;
-        user.resetPasswordExpiresAt = resetTokenExpiresAt;
-        await user.save();
-
-        try {
-            const resetUrl = `${process.env.APP_ORIGIN}/reset-password/${resetToken}`;
-            await emailService.sendPasswordResetEmail(user.email, resetUrl);
-        } catch (emailError) {
-            console.warn("AVISO: E-mail de reset não pôde ser enviado:", emailError.message);
-            // Não reverte o token - o usuário ainda pode usar o link manualmente
-        }
-
-        return res.status(200).json({
-            success: true,
-            message: "Se o email estiver cadastrado, você receberá um link de redefinição",
-            // EM DESENVOLVIMENTO: Mostrar o token diretamente
-            resetToken: process.env.NODE_ENV === 'development' ? resetToken : undefined
-        });
-
-    } catch (error) {
-        console.error("Erro em forgotPassword:", error);
-        return res.status(500).json({
-            success: false,
-            message: "Ocorreu um erro interno. Por favor, tente novamente mais tarde."
-        });
+      return res.status(500).json({
+        success: false,
+        message: "Erro ao enviar email de redefinição. Por favor, tente novamente mais tarde."
+      });
     }
+  } catch (error) {
+    console.error("Erro em forgotPassword:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Ocorreu um erro interno. Por favor, tente novamente mais tarde."
+    });
+  }
 };
 
-export const resetPassword = async (req, res) => {
-    try {
-        const { token } = req.params;
-        const { password } = req.body;
+export const resetPassword = async(req, res) => {
+  try{
+    const {token} = req.params;
+    const {password} = req.body;
 
-        const user = await User.findOne({
-            resetPasswordToken: token,
-            resetPasswordExpiresAt: { $gt: Date.now() },
-        });
+    const user = await User.findOne({
+      resetPasswordToken: token,
+      resetPasswordExpiresAt: {$gt: Date.now()},
+    });
 
-        if (!user) {
-            return res.status(400).json({
-                success: false,
-                message: "Token de redefinição inválido ou expirado"
-            });
-        }
-
-        const hashedPassword = await bcryptjs.hash(password, 10);
-
-        user.password = hashedPassword;
-        user.resetPasswordToken = undefined;
-        user.resetPasswordExpiresAt = undefined;
-        await user.save();
-
-        // Tenta enviar e-mail de sucesso, mas não bloqueia
-        try {
-            await emailService.sendResetSuccessEmail(user.email);
-        } catch (emailError) {
-            console.warn("AVISO: E-mail de sucesso não pôde ser enviado:", emailError.message);
-        }
-
-        res.status(200).json({
-            success: true,
-            message: "Redefinição de senha bem-sucedida"
-        });
-    } catch (error) {
-        console.log("Erro em resetPassword ", error);
-        res.status(400).json({
-            success: false,
-            message: error.message
-        });
+    if(!user){
+      return res.status(400).json({success: false, message: "Token de redefinição inválido ou expirado"});
     }
+
+    //update password
+    const hashedPassword = await bcryptjs.hash(password, 10);
+
+    user.password = hashedPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpiresAt = undefined;
+    await user.save();
+
+    await sendResetSuccessEmail(user.email);
+
+    res.status(200).json({success: true, message: "Redefinição de senha bem-sucedida"})
+  }catch(error){
+    console.log("Erro em resetPassword ", error);
+    res.status(400).json({success: false, message: error.message});
+  }
 };
 
 export const checkAuth = async (req, res) => {
